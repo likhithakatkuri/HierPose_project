@@ -1,0 +1,39 @@
+# Core ML
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+pandas>=2.0
+joblib>=1.3
+
+# Gradient Boosting
+lightgbm>=4.0
+xgboost>=2.0
+
+# Hyperparameter optimization
+optuna>=3.4
+
+# Explainability
+shap>=0.44
+
+# Visualization
+matplotlib>=3.7
+seaborn>=0.12
+
+# Streamlit UI
+streamlit>=1.28
+
+# LLM Commentary (Groq via REST API)
+requests>=2.31
+python-dotenv>=1.0
+
+# Data loading
+h5py>=3.9
+
+# Optional: real-time inference
+# mediapipe>=0.10
+
+# YAML config
+pyyaml>=6.0
+
+# Testing
+pytest>=7.4

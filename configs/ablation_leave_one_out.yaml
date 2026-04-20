@@ -1,0 +1,13 @@
+hierpose:
+  data_root: "/path/to/JHMDB"
+  split_num: 1
+  model_type: "lgbm"
+  tune_hyperparams: false
+  n_cv_folds: 5
+  output_dir: "outputs/ablation_loo"
+  random_seed: 42
+
+ablation:
+  ablation_mode: "leave_one_out"
+  n_cv_folds: 5
+  output_dir: "outputs/ablation_loo"

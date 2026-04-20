@@ -1,0 +1,425 @@
+PSRN Implementation Guide (Cursor-Ready)
+========================================
+
+Source
+------
+This guide distills the paper “Pose-Based Two-Stream Relational Networks for Action Recognition in Videos” (arXiv:1805.08484) into a practical, implementation-ready plan with code scaffolding, training steps, and PEP 8 engineering practices. Use it as a single reference inside Cursor. fileciteturn0file0
+
+What You’ll Build (High-Level)
+------------------------------
+**Goal:** Recognize actions in short videos by combining (1) the temporal dynamics of 2D human poses and (2) objects present in a sampled frame. The model is called **PSRN** (Pose‑based Two‑Stream Relational Network). (Fig. 1, p. 4) fileciteturn0file0
+
+**Three parts:**
+1) **Temporal pose stream** — multi‑person 2D pose estimation per frame, attention to select the target person, sequences of **pose positions** and **pose velocities**, each encoded by (bi‑)LSTMs; we use the last hidden states `h_T^L` and `h_T^V`. (Sec. 3.1–3.2, pp. 6–9) fileciteturn0file0  
+2) **Spatial object stream** — a CNN (VGG16) on one randomly sampled frame to get a 7×7 grid of 512‑D feature vectors (49 “objects”). (Sec. 3.3, p. 8) fileciteturn0file0  
+3) **Pose‑Object Relational Network (RN)** — fuses the two streams by learning relations between `(h_T^L, h_T^V)` and each object vector, sums over objects, then classifies from the relation feature `R`. (Eq. (8), Sec. 3.4, p. 9) fileciteturn0file0
+
+**Why it helps:** Poses give structured motion; objects matter for human‑object actions (e.g., racket, barbell). RN gives a principled fusion instead of score averaging. Results in the paper: **Sub‑JHMDB 80.2%**, **PennAction 98.1%** (Table 1, p. 12). fileciteturn0file0
+
+Key Details from the Paper (Faithfully Mapped to Code)
+------------------------------------------------------
+1) **Pose estimation & pose filling** (Sec. 3.1–3.2; Fig. 2–3, pp. 6–7):  
+   - Use a real‑time multi‑person **2D pose estimator** (the paper retrains PAF/OpenPose; you can use any reliable 2D estimator). The dataset variant has **14 keypoints** (COCO‑18 minus eyes/ears/nose, plus top‑of‑head).  
+   - For each video, set **N = max #persons** seen in any frame. For frames with < N persons, **pad with virtual persons** (all joints at **(0, 0)**). For incomplete persons, fill missing joints with **(0, 0)**.  
+   - **Normalize keypoints to [0, 1]** by dividing by frame width/height.  
+   - Output per video: `(T, N, 14, 2)` float32.
+
+2) **Body‑part encoder** (Sec. 3.2; Fig. 3b, p. 7):  
+   - Split the 14 joints into 5 parts: **head (8‑D), left arm (6‑D), right arm (6‑D), left leg (6‑D), right leg (6‑D)** (each dim is a coordinate).  
+   - For each part, MLP to **100‑D**, then **concatenate** 5 parts → **500‑D** pose vector per person.
+
+3) **Target person selection via attention** (Eq. (1)–(6), pp. 7–8; Fig. 4):  
+   - At time `t`, you have N pose vectors `L_{t,i} ∈ R^500`. Compute attention scores with an MLP `f_att([L_{t,i}; h_{t-1}]) → e_{t,i}`, softmax → `α_{t,i}`.  
+   - Selected pose: `l_t = Σ_i α_{t,i} L_{t,i}`.  
+   - Feed `l_t` into an LSTMCell to update the attention’s hidden state (used only to guide selection).  
+   - Collect `l_1..l_T` as the **position** sequence.
+
+4) **Position & velocity encoders** (Eq. (7), Sec. 3.2, p. 8; Sec. 3.5, p. 9):  
+   - Position BiLSTM over `l_1..l_T` → final hidden **`h_T^L` (512)**.  
+   - Velocity sequence `V_t = l_{t+1} − l_t` (pad 0 to length T) → BiLSTM → **`h_T^V` (512)**.  
+   - Paper replaces initial uni‑LSTMs with **bi‑LSTMs** for gains (Sec. 3.5).
+
+5) **Object stream** (Sec. 3.3, p. 8):  
+   - Randomly sample **one** frame; run **VGG16**; take last conv feature map → **7×7×512**. Flatten to **49×512** vectors `{x_i}`.
+
+6) **Relational fusion** (Eq. (8), Sec. 3.4, p. 9):  
+   - For each object `x_i`, compute `g_θ([h_T^L, h_T^V, x_i])` with a **4‑layer MLP (512 per layer, ReLU)**. Sum over i, pass through `f_φ(·)` with a **2‑layer MLP (512 per layer, ReLU)** → relation feature `R` (512).
+
+7) **Training objective & schedule** (Eq. (9)–(10), Sec. 3.5, pp. 9–10):  
+   - **Three heads**: classify from `h_T^L` (position), `h_T^V` (velocity), and `R` (relation).  
+   - **Loss**: `L_total = L_pos + L_vel + L_rel + λ‖θ‖²`, with **λ = 4e‑5** (weight decay).  
+   - **Optimizer**: Adam β₁ = 0.9, β₂ = 0.999.  
+   - **Three‑stage training**:  
+     1) **Stage 1:** train pose stream only (`L_pos + L_vel`), lr = 1e‑4, halve after **78k** iterations.  
+     2) **Stage 2:** freeze pose; train VGG16 + RN on `L_rel`. Warmup lr **1e‑6 → 1e‑4** over **2k** steps, halve after **28k** iterations. Initialize VGG16 from ImageNet.  
+     3) **Stage 3:** fine‑tune **end‑to‑end** on `L_total`.  
+   - **Sampling**: sample **10 frames** per video for pose stream; **resample one of these** for object stream; **lookback = 5** for the LSTM implementations. (Sec. 4.2, p. 11)  
+
+8) **Datasets** (Sec. 4.1, pp. 10–11):  
+   - **Sub‑JHMDB**: 316 clips, 12 actions, 3 splits; report average accuracy.  
+   - **PennAction**: 2,326 videos, 15 actions; single split; rich annotations.  
+
+Figures/Tables to Keep in Mind
+-------------------------------
+- **Fig. 1 (p. 4)**: PSRN end‑to‑end diagram; remember RN fuses after extracting `(h_T^L, h_T^V)` and 49 object vectors.  
+- **Fig. 2 (p. 6)**: Pose estimator outcomes/failures; your **pose filling** step is crucial.  
+- **Fig. 3 (p. 7)**: Pose filling (3a) + five part grouping (3b).  
+- **Fig. 4 (p. 8)**: Attention focuses on the target person.  
+- **Table 1 (p. 12)**: Final accuracies; SOTA results with two‑stream RN.  
+- **Tables 2–3 (pp. 12–13)**: Ablations: bi‑LSTMs + attention + RN are the winning combo. fileciteturn0file0
+
+Cursor Step‑by‑Step Build Plan
+------------------------------
+**Environment**  
+- Python **3.10+**; PyTorch and TorchVision.  
+- Install: `torch`, `torchvision`, `opencv-python`, `numpy`, `tqdm`, `pydantic` or `dataclasses`, `pyyaml` (optional), `mypy`, `black`, `flake8`, `isort`.
+
+**Project layout**
+```
+psrn/
+  configs.py
+  train.py
+  eval.py
+  README.md
+  requirements.txt
+  data/
+    datasets.py
+    preprocessing.py
+  models/
+    parts_mlp.py
+    pose_selector.py
+    pose_stream.py
+    object_stream.py
+    relational.py
+    psrn.py
+  utils/
+    metrics.py
+    schedulers.py
+    logging.py
+```
+
+**0) Preprocess videos → poses (offline)**  
+1. Run a multi‑person **2D pose estimator** over all frames; save per‑frame JSON:  
+   `[{"people":[{"keypoints":[[x1,y1,conf1], …]}]}, …]`. (Sec. 3.1, p. 6)  
+2. **Pose filling** (Sec. 3.2): find `N = max persons in any frame`; for frames with < N, append **virtual persons (0,0)**; for missing joints use **(0,0)**. (Fig. 3a, p. 7)  
+3. **Normalize to [0,1]** (divide by width/height).  
+4. Store ndarray per video: shape `(T, N, 14, 2)`.  
+
+**1) Dataset & sampling**  
+- For each training sample: sample **10 frames** uniformly; fetch pose tensor `(10, N, 14, 2)`.  
+- Choose **one of these 10** frames at random for the object stream (store image path for that frame). (Sec. 4.2, p. 11)  
+
+**2) Body‑part encoder**  
+- Split joints into 5 parts (dims: 8/6/6/6/6). Each → **MLP→100‑D** → concat → **500‑D** pose vector per person. (Sec. 3.2; Fig. 3b)  
+
+**3) Pose attention selector**  
+- Implement Eq. (1)–(6): for each `t`, compute attention over N persons using previous hidden state; get `l_t`. (pp. 7–8; Fig. 4)  
+
+**4) Position/Velocity BiLSTMs**  
+- Position BiLSTM over `l_1..l_T` → `h_T^L (512)`.  
+- Velocity sequence `V_t = l_{t+1} − l_t` (pad 0) → BiLSTM → `h_T^V (512)`. (Sec. 3.2, 3.5)  
+
+**5) Object stream (VGG16)**  
+- Input a **224×224** crop; take last conv feature map → **7×7×512** (→ 49×512 vectors). (Sec. 3.3)  
+
+**6) Relational Network (RN)**  
+- `g_θ`: **4×512** MLP on `[h_T^L; h_T^V; x_i]` (1536‑D input).  
+- Sum over i; `f_φ`: **2×512** MLP → `R`. (Eq. (8), Sec. 3.4)  
+
+**7) Heads, loss, schedule**  
+- Three heads: `Linear(512, C)` for `h_T^L`, `h_T^V`, and `R`.  
+- Loss `L_total = L_pos + L_vel + L_rel + 4e‑5*wd`.  
+- Optimizer: Adam (β₁=0.9, β₂=0.999).  
+- Stages: **Stage 1** pose only (lr 1e‑4; halve after 78k). **Stage 2** freeze pose; train VGG16+RN with warmup to 1e‑4 (2k) then halve after 28k. **Stage 3** end‑to‑end. (Sec. 3.5)  
+
+**8) Inference & evaluation**  
+- Use the same sampling (10 frames; one object frame). For stability, average a few random samples at test time. (Sec. 4.2)  
+- Report accuracy per dataset protocol (Sub‑JHMDB averaged over 3 splits). (Sec. 4.1)  
+
+Minimal, Faithful PyTorch Scaffolding
+-------------------------------------
+> Paste these files under `models/` in Cursor. They match the paper’s shapes and hyperparameters.
+
+`models/parts_mlp.py`
+```python
+from __future__ import annotations
+import torch
+from torch import nn, Tensor
+
+class PartsMLP(nn.Module):
+    """Encodes 5 pose parts into 5×100 then concatenates → 500-D."""
+    def __init__(self) -> None:
+        super().__init__()
+        # From Sec. 4.2: head=8, each arm=6, each leg=6.
+        self.part_dims = [8, 6, 6, 6, 6]
+        self.mlps = nn.ModuleList([nn.Sequential(
+            nn.Linear(d, 100),
+            nn.ReLU(inplace=True),
+            nn.Linear(100, 100),
+            nn.ReLU(inplace=True),
+        ) for d in self.part_dims])
+
+    def forward(self, parts: list[Tensor]) -> Tensor:
+        """
+        Args:
+            parts: list of 5 tensors, each (B*N, part_dim)
+        Returns:
+            (B*N, 500) tensor
+        """
+        outs = [mlp(p) for mlp, p in zip(self.mlps, parts)]
+        return torch.cat(outs, dim=-1)
+```
+
+`models/pose_selector.py`
+```python
+from __future__ import annotations
+import torch
+from torch import nn, Tensor
+
+class PoseAttentionSelector(nn.Module):
+    """Eq. (1)-(6): attention over N persons to select l_t, plus LSTMCell state."""
+    def __init__(self, pose_dim: int = 500, hidden: int = 512) -> None:
+        super().__init__()
+        self.cell = nn.LSTMCell(pose_dim, hidden)
+        self.att_mlp = nn.Sequential(
+            nn.Linear(pose_dim + hidden, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, 1)
+        )
+
+    def forward(self, L: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Args:
+            L: (B, T, N, 500) pose vectors
+        Returns:
+            l_seq: (B, T, 500) attended pose per time step
+            h_T:   (B, hidden) last hidden state
+        """
+        B, T, N, D = L.shape
+        h = L.new_zeros(B, self.cell.hidden_size)
+        c = L.new_zeros(B, self.cell.hidden_size)
+        l_seq = []
+
+        for t in range(T):
+            L_t = L[:, t]                               # (B, N, D)
+            h_rep = h.unsqueeze(1).expand(B, N, h.shape[-1])
+            att_in = torch.cat([L_t, h_rep], dim=-1)    # (B, N, D+H)
+            e = self.att_mlp(att_in).squeeze(-1)        # (B, N)
+            alpha = e.softmax(dim=1).unsqueeze(-1)      # (B, N, 1)
+            l_t = (alpha * L_t).sum(dim=1)              # (B, D)
+            h, c = self.cell(l_t, (h, c))
+            l_seq.append(l_t)
+
+        l_seq = torch.stack(l_seq, dim=1)               # (B, T, D)
+        return l_seq, h
+```
+
+`models/pose_stream.py`
+```python
+from __future__ import annotations
+import torch
+from torch import nn, Tensor
+
+class PoseStream(nn.Module):
+    """BiLSTM encoders for position and velocity sequences."""
+    def __init__(self, pose_dim: int = 500, hidden: int = 512) -> None:
+        super().__init__()
+        self.pos_bi = nn.LSTM(
+            input_size=pose_dim, hidden_size=hidden // 2,
+            num_layers=1, batch_first=True, bidirectional=True
+        )
+        self.vel_bi = nn.LSTM(
+            input_size=pose_dim, hidden_size=hidden // 2,
+            num_layers=1, batch_first=True, bidirectional=True
+        )
+
+    @staticmethod
+    def make_velocity(l_seq: Tensor) -> Tensor:
+        v = l_seq[:, 1:] - l_seq[:, :-1]               # (B, T-1, D)
+        pad = torch.zeros_like(v[:, :1])               # pad last to length T
+        return torch.cat([v, pad], dim=1)
+
+    def forward(self, l_seq: Tensor) -> tuple[Tensor, Tensor]:
+        pos_out, (h_pos, _) = self.pos_bi(l_seq)       # h_pos: (2, B, 256)
+        v_seq = self.make_velocity(l_seq)
+        vel_out, (h_vel, _) = self.vel_bi(v_seq)
+
+        hL_T = torch.cat([h_pos[-2], h_pos[-1]], dim=-1)  # (B, 512)
+        hV_T = torch.cat([h_vel[-2], h_vel[-1]], dim=-1)  # (B, 512)
+        return hL_T, hV_T
+```
+
+`models/object_stream.py`
+```python
+from __future__ import annotations
+import torch
+from torch import nn, Tensor
+from torchvision import models
+
+class VGGObjectStream(nn.Module):
+    """Extracts 7x7x512 feature map; returns (B, 49, 512)."""
+    def __init__(self) -> None:
+        super().__init__()
+        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
+        self.features = vgg.features
+
+    def forward(self, x224: Tensor) -> Tensor:
+        feat = self.features(x224)                        # (B, 512, 7, 7)
+        B, C, H, W = feat.shape
+        return feat.permute(0, 2, 3, 1).reshape(B, H*W, C)  # (B, 49, 512)
+```
+
+`models/relational.py`
+```python
+from __future__ import annotations
+import torch
+from torch import nn, Tensor
+
+class RelationalNetwork(nn.Module):
+    """R = f_phi( sum_i g_theta([hL_T, hV_T, x_i]) ), per Eq. (8)."""
+    def __init__(self, d_pose: int = 512, d_obj: int = 512, d: int = 512) -> None:
+        super().__init__()
+        in_dim = d_pose + d_pose + d_obj  # 1536
+        self.g = nn.Sequential(
+            nn.Linear(in_dim, d), nn.ReLU(inplace=True),
+            nn.Linear(d, d), nn.ReLU(inplace=True),
+            nn.Linear(d, d), nn.ReLU(inplace=True),
+            nn.Linear(d, d), nn.ReLU(inplace=True),
+        )
+        self.f = nn.Sequential(
+            nn.Linear(d, d), nn.ReLU(inplace=True),
+            nn.Linear(d, d), nn.ReLU(inplace=True),
+        )
+
+    def forward(self, hL: Tensor, hV: Tensor, X: Tensor) -> Tensor:
+        B, K, D = X.shape
+        pose = torch.cat([hL, hV], dim=-1).unsqueeze(1).expand(B, K, -1)
+        g_in = torch.cat([pose, X], dim=-1)               # (B, 49, 1536)
+        g_out = self.g(g_in)                              
+        summed = g_out.sum(dim=1)                         # (B, 512)
+        return self.f(summed)                             # (B, 512)
+```
+
+`models/psrn.py`
+```python
+from __future__ import annotations
+import torch
+from torch import nn, Tensor
+
+class PSRN(nn.Module):
+    def __init__(self, parts_encoder: nn.Module,
+                 selector: nn.Module,
+                 pose_stream: nn.Module,
+                 obj_stream: nn.Module,
+                 rn: nn.Module,
+                 num_classes: int) -> None:
+        super().__init__()
+        self.parts = parts_encoder
+        self.selector = selector
+        self.pose_stream = pose_stream
+        self.obj_stream = obj_stream
+        self.rn = rn
+        self.head_pos = nn.Linear(512, num_classes)
+        self.head_vel = nn.Linear(512, num_classes)
+        self.head_rel = nn.Linear(512, num_classes)
+
+    def forward(self, pose_parts, obj_image: Tensor) -> dict[str, Tensor]:
+        # Encode parts -> (B,T,N,500)
+        parts_list = [p.reshape(-1, p.shape[-1]) for p in pose_parts.values()]
+        pose_500 = self.parts(parts_list).reshape(pose_parts["head"].shape[:-1] + (500,))
+
+        # Attention selection
+        l_seq, _ = self.selector(pose_500)                # (B, T, 500)
+
+        # Pose BiLSTMs
+        hL_T, hV_T = self.pose_stream(l_seq)              # (B, 512) each
+
+        # Object stream & RN
+        X = self.obj_stream(obj_image)                    # (B, 49, 512)
+        R = self.rn(hL_T, hV_T, X)                        # (B, 512)
+
+        return {
+            "pos": self.head_pos(hL_T),
+            "vel": self.head_vel(hV_T),
+            "rel": self.head_rel(R),
+        }
+```
+
+Training Loop Highlights (3‑Stage Schedule)
+-------------------------------------------
+- Create separate optimizer phases and be explicit about `requires_grad` for each stage. (Sec. 3.5, pp. 9–10)  
+- **Stage 1:** train pose stream only (heads: `pos`, `vel`).  
+- **Stage 2:** freeze pose stream; train VGG16 + RN (head: `rel`) with **lr warmup** 1e‑6→1e‑4 over 2k steps; then halve after 28k.  
+- **Stage 3:** unfreeze all; train on `L_total` (sum of three losses + weight decay).
+
+Practical Notes & Pitfalls
+--------------------------
+- **Frame sampling:** Always 10 frames per clip; the object frame is **one of those 10** (the paper does random sampling even at test time). (Sec. 4.2, p. 11)  
+- **Resolutions:** Object frames to **224×224**; keep poses normalized to **[0, 1]**. (Sec. 4.2)  
+- **Hidden sizes:** BiLSTMs total hidden **512** (256 per direction). RN MLPs are 512‑unit layers. (Sec. 3.5, 4.2)  
+- **Lookback = 5:** You can concatenate the last 5 BiLSTM outputs before each head, or implement a small temporal conv with kernel=5. (Sec. 3.5)  
+- **Sanity checks:** Visualize attention weights `α_{t,i}` over people; target person should dominate (cf. Fig. 4, p. 8).  
+- **Expected ballpark:** Sub‑JHMDB ~80% (two‑stream), PennAction ~98% (two‑stream). Your numbers depend on pose quality and training consistency. (Table 1, p. 12)
+
+PEP 8 + “Good Engineering” Checklist (Copy into Your README)
+------------------------------------------------------------
+**Style & Types**
+- Snake_case for functions/variables, CapWords for classes, UPPER_CASE for constants.  
+- Line length ≤ 88; run **Black**, **isort**, **flake8** in pre‑commit.  
+- Use **type hints** everywhere; run **mypy**/pyright.
+
+**Docs & Comments**
+- Module/class/method docstrings (PEP 257).  
+- For math, reference Eq. numbers from the paper in comments (e.g., “per Eq. (8)”).
+
+**Config & Repro**
+- Centralize hyperparams in `@dataclass`/YAML; do **not** hard‑code in models.  
+- Seed all RNGs; log seeds, commits, and config in checkpoints.  
+- `torch.backends.cudnn.deterministic = True` if you need determinism.
+
+**Logging & Metrics**
+- Use `logging` (not prints).  
+- Track `L_pos`, `L_vel`, `L_rel`, and total; track attention entropy.  
+- Save best checkpoint by validation accuracy; include optimizer + sched state.
+
+**Testing**
+- Unit‑test each module with random tensors for shape/grad flow.  
+- Overfit a tiny subset; ensure losses can go near zero.
+
+**Data & IO**
+- Validate pose JSON → ndarray; assert shapes `(T, N, 14, 2)`.  
+- Move arrays to tensors early; use pinned memory; avoid Python-side loops.
+
+**Training Safety**
+- Gradient clipping (e.g., 5.0) for LSTMs.  
+- Use **warmup** in Stage 2 as specified; verify proper freezing/unfreezing.  
+- Evaluate with the same sampling policy as training.
+
+Appendix: Quick Requirements Template
+-------------------------------------
+```
+torch>=2.2
+torchvision>=0.17
+opencv-python
+numpy
+tqdm
+pydantic
+pyyaml
+black
+flake8
+isort
+mypy
+```
+
+Appendix: Data Interface Contract
+---------------------------------
+- **Input (per batch):**
+  - `pose_parts`: dict with 5 tensors: `head`, `left_arm`, `right_arm`, `left_leg`, `right_leg`; each of shape **(B, T, N, part_dim)** with dims 8/6/6/6/6, values in [0,1].
+  - `obj_img`: tensor **(B, 3, 224, 224)**, normalized per ImageNet.
+  - `y`: tensor **(B,)** class indices.
+- **Output (forward):**
+  - dict with logits for `'pos'`, `'vel'`, `'rel'` (each **(B, C)**).
+
+Attribution
+-----------
+Core ideas, equations, figures, hyperparameters, training schedule, and dataset protocols are from the original paper. See: Figs. 1–4; Secs. 3.1–3.5; Secs. 4.1–4.4; Tables 1–3; Eqs. (1)–(10). fileciteturn0file0

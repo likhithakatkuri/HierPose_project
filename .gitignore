@@ -1,0 +1,41 @@
+﻿# Virtual environments
+hpose_env/
+.venv
+venv/
+# PyTorch checkpoints
+checkpoints/
+*.pt
+*.pth
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+# Binary files
+*.dll
+*.pyd
+*.so
+# Data files
+demo_data/
+data/
+logs/
+output/
+outputs/
+# IDE
+.VS Code/
+.idea/
+*.swp
+*.swo
+# OS
+.DS_Store
+Thumbs.db
+# Temporary files
+*.tmp
+*.log
+弊灟捹捡敨彟ਯ⸪祰੣⸪祰੯⸪扤搊浥彯慤慴ਯ慤慴ਯ慣档⽥漊瑵異獴ਯ档捥火楯瑮⽳⸊敶癮ਯ⸪瑰⨊瀮桴⨊洮㑰⨊瀮杮挊敬湡晟慲敭⸪湰੧挊敨正潰湩獴⨯瀮ੴ档捥火楯瑮⽳⸪瑰੨.env
+.env
+攮癮ਊ攮癮⨊攮癮�
+*.env
