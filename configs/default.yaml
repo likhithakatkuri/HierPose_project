@@ -1,0 +1,19 @@
+hierpose:
+  data_root: "data/JHMDB"          # joint_positions/ + splits/ live here
+  split_num: 1                      # official split 1, 2, or 3
+  feature_cache_dir: "cache/features"
+  enabled_feature_groups: null      # null = all 16 groups (~380 features)
+  normalize_by_torso: true
+  augment_train: true
+  model_type: "svm"                 # lgbm | xgb | rf | svm | lda | ensemble
+  n_cv_folds: 5
+  tune_hyperparams: true
+  use_pca: false                    # must stay false for SHAP interpretability
+  output_dir: "outputs/experiments"
+  experiment_name: "hierpose_jhmdb_split1"
+  random_seed: 42
+
+ablation:
+  ablation_mode: "leave_one_out"
+  n_cv_folds: 5
+  output_dir: "outputs/ablation"
